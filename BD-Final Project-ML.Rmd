@@ -1,0 +1,558 @@
+---
+title: "BD-Final Project-EDA"
+output: html_document
+date: "2023-05-11"
+---
+```{r}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(clustMixType)
+```
+
+```{r}
+library(rpart) 
+library(xgboost) 
+library(ranger)
+library(caret)
+```
+
+#Data Wrangling
+
+```{r}
+rm(list=ls())
+setwd("/Users/lyidacao/Desktop/2022-2023 assignment/2022-2023 Term3/Big Data/final projet/archive")
+
+fraud_data <- read.csv('Base.csv')
+
+#check NAs
+sapply(fraud_data, function(x) sum(is.na(x)))
+
+#check the data type of each variable
+#str(fraud_data)
+
+#turn numeric variables with less than 9 unique values into categorical variables 
+unique.per.column <- sapply(select_if(fraud_data, is.numeric), n_distinct)
+column.names.to.factor <- names(unique.per.column)[unique.per.column < 9]
+fraud_data <- mutate_at(fraud_data, column.names.to.factor, as.factor)
+
+#delete column where all value = 0
+str(fraud_data)
+fraud_data <- fraud_data %>% select(-device_fraud_count)
+
+```
+
+sloving the imbalance issues (from about 100,000 to 20,000 records)
+```{r}
+
+set.seed(1)
+#first, there are imbalances in our y_value. We use downsampling to make our imbalanced data balanced. This could improve our prediction. 
+
+#Undersampling for Unbalanced Datasets
+fraud_data = downSample(x = select(fraud_data, -fraud_bool),
+                  y = fraud_data$fraud_bool,
+                  list = FALSE, yname = "fraud_bool")
+table(fraud_data$fraud_bool)
+
+str(fraud_data)
+#second, there are outliers in X values, according to our EDA. Only 1 BG, and 4 AE. it wouldn't affect our prediction. So delete them. 
+table(fraud_data$housing_status)
+table(fraud_data$payment_type)
+
+fraud_data <- fraud_data[fraud_data$housing_status != 'BG', ]
+fraud_data <- fraud_data[fraud_data$payment_type != 'AE', ]
+
+```
+
+##Clustering 
+K-means / Hierarchical clustering are not appropriate because we have both categorical and numerical variables. Thus, I choose K-Prototype algorithm.  Model explain (K-Prototype Clustering)
+
+```{r}
+# identify numeric and factor columns
+is_num_or_factor <- sapply(fraud_data, function(x) is.numeric(x) | is.factor(x))
+
+# subset the data to include only these columns
+fraud_data_num_and_factor <- fraud_data[, is_num_or_factor]
+fraud_data_num_and_factor <- fraud_data_num_and_factor %>% select(-fraud_bool)
+
+credit_clusters <- kproto(fraud_data_num_and_factor, 3)
+credit_clusters
+summary(credit_clusters)
+
+# save the cluster assignments to our data
+fraud_data$cluster <- credit_clusters$cluster
+
+# examine 
+table(fraud_data$cluster)
+
+```
+The clusters seem to differ in some variables more than others. For instance, the variable velocity_6h shows substantial differences between the clusters, suggesting that it's an important variable for distinguishing between different types of credit fraud.
+
+Some variables don't show much difference across clusters (income, customer_age, credit_risk_score, etc.). This might suggest that these variables are not as useful for distinguishing between different types of credit fraud.
+
+The categorical variables (email_is_free, phone_home_valid, etc.) show some differences between clusters. These could be important variables for distinguishing different types of credit fraud.
+
+#Machine Learning
+```{r}
+#partition the data into 60% training and 40% validation set
+
+set.seed(123)
+
+fraud_data$cluster <- as.factor(fraud_data$cluster)
+n = dim(fraud_data)[1]
+ind = sample(n, floor(0.6*n))
+fraud.train = fraud_data[ind,]
+fraud.test = fraud_data[-ind,]
+
+paste("Number of observations in the training set:", dim(fraud.train)[1])
+paste("Number of observations in the validation set:", dim(fraud.test)[1])
+
+
+```
+
+#Some helper functions:
+```{r}
+get_deviance = function(y, phat, wht=1e-7){
+  if(is.factor(y)) y = as.numeric(y)-1
+  phat = (1-wht)*phat + wht*.5
+  py = ifelse(y==1, phat, 1-phat)
+  return(-2*sum(log(py)))
+}
+
+get_confusion_matrix = function(y, phat, thr=0.5){
+  if(is.numeric(y)) y = as.factor(y)
+  yhat = as.factor(ifelse(phat > thr, 1, 0)) 
+  confusionMatrix(yhat, y)
+}
+```
+
+where phats will be stored:
+```{r}
+phat_list = list() 
+```
+
+
+#Logistic Regression:
+
+```{r}
+logistic <- glm(fraud_bool ~ ., family = binomial, data = fraud.train)
+
+summary(logistic)
+
+#prediction based on logistic regression
+logit.phat = predict(logistic, fraud.test, type = 'response')
+
+#store all predictions into a list
+phat_list$logit.phat = matrix(logit.phat,ncol=1)
+
+
+```
+
+Confusion matrix and accuracy:
+```{r}
+#confusion matrix
+get_confusion_matrix(as.factor(fraud.test$fraud_bool), logit.phat)
+```
+```{r}
+3521/(3521+883)
+```
+#precision for identifying fraud case: 0.7995005
+
+#Knn: 
+```{r}
+library(kknn)
+
+# Feature scaling for training and testing data
+fraud.train.knn <- data.frame(model.matrix(~.-1, fraud.train)) 
+fraud.test.knn <- data.frame(model.matrix(~.-1, fraud.test))
+
+# Feature scaling for training and testing data
+fraud.train.scaled <- data.frame(scale(fraud.train.knn[,-31]))
+fraud.test.scaled <- data.frame(scale(fraud.test.knn[,-31]))
+
+# Add the response variable back to the scaled data frames
+fraud.train.scaled$fraud_bool <- fraud.train$fraud_bool
+fraud.test.scaled$fraud_bool <- fraud.test$fraud_bool
+
+table(fraud.train$payment_type)
+```
+
+```{r}
+# Define the grid for k and distance parameters
+grid_knn = expand.grid(
+  k = c(5, 10),  # Number of neighbors
+  distance = c(1, 2)   # Distance metric
+)
+
+# Initialize a matrix to store probabilities
+phat_list$knn = matrix(0, nrow(fraud.test), nrow(grid_knn))
+
+# Loop over the grid
+for (i in 1:nrow(grid_knn)){
+  # Train the k-NN model
+  knn_fit = train.kknn(
+    formula = fraud_bool~., 
+    data = fraud.train.scaled, 
+    kmax = grid_knn$k[i],
+    distance = grid_knn$distance[i], 
+    kernel = "rectangular", 
+    scale = TRUE
+  )
+
+  # Store the predicted probabilities
+  phat_list$knn[,i] = predict(knn_fit, newdata = fraud.test.scaled, type = "prob")[,2]
+}
+
+```
+Grid Search for Knn
+```{r}
+# Calculate losses for each parameter combination
+losses_knn = c()
+for (i in 1:nrow(grid_knn)){
+  losses_knn[i] = get_deviance(fraud.test$fraud_bool, phat_list$knn[,i])
+}
+
+# Get the best parameters
+best_param_knn = grid_knn[which.min(losses_knn),]
+best_param_knn
+# Train the k-NN model with the best parameters
+best_knn_fit = train.kknn(
+  formula = fraud_bool~., 
+  data = fraud.train.scaled, 
+  kmax = 10,
+  distance = 1, 
+  kernel = "rectangular", 
+  scale = TRUE
+)
+
+# Generate predictions using the best model
+best_phat_knn = predict(best_knn_fit, newdata = fraud.test.scaled, type = "prob")[,2]
+
+```
+
+Confusion matrix by KNN
+```{r}
+knn_res = get_confusion_matrix(fraud.test$fraud_bool, best_phat_knn)
+knn_res$table
+
+# Print the accuracy 
+paste('Accuracy:', round(knn_res$overall[1],3))
+
+4183/(4183+221)
+```
+
+
+#Decision Tree
+Fit trees:
+```{r}
+grid_tree = expand.grid(
+  max_depth = c(5, 10, 20),
+  cp = c(0.1, 0.01, 0.001),
+  minsplit = c(1, 5, 10, 20),
+  minbucket = c(5, 10, 15)
+)
+
+phat_list$tree = matrix(0, nrow(fraud.test), nrow(grid_tree))
+
+for (i in 1:nrow(grid_tree)){
+  tree_fit = rpart(
+    formula = fraud_bool~., 
+    data = fraud.train,
+    method = 'class',
+    control = rpart.control(
+      max_depth = grid_tree$max_depth[i],
+      cp = grid_tree$cp[i],
+      minsplit = grid_tree$minsplit[i],
+      min_bucket = grid_tree$minbucket[i])
+  )
+    phat_list$tree[,i] = predict(tree_fit, newdata=fraud.test[,-31], type="prob")[,2]
+}
+
+
+```
+
+Tree with best parameters:
+```{r}
+losses_tree = c()
+for (i in 1:nrow(grid_tree)){
+  losses_tree[i] = get_deviance(fraud.test$fraud_bool, phat_list$tree[,i])
+}
+
+best_param_tree = grid_tree[which.min(losses_tree),]
+
+best_tree_fit = rpart(
+  formula = fraud_bool~.,
+  data = fraud.train,
+  method = 'class',
+  control = rpart.control(
+    cp = best_param_tree$cp,
+    minsplit = best_param_tree$minsplit)
+  )
+
+best_phat_tree = predict(best_tree_fit, newdata=fraud.test[,-31], type='prob')[,2]
+```
+
+
+Confusion Matrix & Accuracy:
+```{r}
+tree_res = get_confusion_matrix(fraud.test$fraud_bool, best_phat_tree)
+tree_res$table
+
+#accuracy 
+paste('Accuracy:', round(tree_res$overall[1],3))
+
+#0.772 accuracy 
+
+#Precision
+#For Fraud:
+3400/(3400+1038)
+#Precision (Fraud) = TP / (TP + FP):0.7661109
+
+#For No Fraud:
+3409 / (3409 + 977)
+#Precision (No Fraud) = TN / (TN + FN) = 0.7772458
+
+```
+
+#Boosting - XGBoost Model
+
+Preprocessing:
+```{r}
+library(dbarts)
+fraud.train[,-31]
+X_train = makeModelMatrixFromDataFrame(fraud.train[,-31])
+y_train = as.numeric(fraud.train$fraud_bool)-1
+X_val = makeModelMatrixFromDataFrame(fraud.test[,-31])
+y_val = as.numeric(fraud.test$fraud_bool)-1
+
+```
+
+
+Fit boosted trees:
+```{r}
+grid_boost = expand.grid(
+  shrinkage = c(0.1, 0.01, 0.001, 0.0001), 
+  interaction.depth = c(1, 2, 4),
+  nrounds = c(1000, 2000, 5000)
+)
+
+phat_list$boost = matrix(0, nrow(fraud.test), nrow(grid_boost)) 
+
+for (i in 1:nrow(grid_boost)){
+  params = list(
+    eta = grid_boost$shrinkage[i], 
+    max_depth = grid_boost$interaction.depth[i]
+  )
+  
+  set.seed(4776)
+  
+  boost_fit = xgboost(
+    data = X_train,
+    label = y_train,
+    params = params,
+    nrounds = grid_boost$nrounds[i],
+    objective = 'binary:logistic',
+    verbose = 0,
+    verbosity = 0
+  )
+  
+  phat_list$boost[,i] = predict(boost_fit, newdata=X_val)
+}
+
+boost_fit
+```
+Boosted trees with best parameters:
+
+```{r}
+losses_boost = c()
+for (i in 1:nrow(grid_boost)){
+  losses_boost[i] = get_deviance(y_val, phat_list$boost[,i])
+}
+
+best_param_boost = grid_boost[which.min(losses_boost),]
+
+best_param = list(
+  eta = best_param_boost$shrinkage, 
+  max_depth = best_param_boost$interaction.depth
+)
+
+set.seed(4776)
+
+boost_fit_best = xgboost(
+    data = X_train,
+    label = y_train,
+    params = best_param,
+    nrounds = best_param_boost$nrounds,
+    objective = 'binary:logistic',
+    verbose = 0,
+    verbosity = 0
+  )
+
+best_phat_boost = predict(boost_fit_best, newdata=X_val)
+```
+
+Confusion matrix & accuracy:
+```{r}
+boost_res = get_confusion_matrix(y_val, best_phat_boost)
+boost_res$table
+
+```
+```{r}
+paste('Accuracy:', round(boost_res$overall[1],3))
+
+```
+
+precision: 3587/(3587+817) = 0.8144868
+
+##Wrong!!
+#Random Forest: There's some issues with RF method here. The accuracy is only 0.16.. My method may be flawed. please check!
+```{r}
+grid_rf = expand.grid(
+  num_tree = c(200, 500, 1000,2000),
+  sample_frac = seq(from=0.2, to=0.8, by=0.1),
+  node_size = c(1, 5, 10,20, 30)
+)
+
+phat_list$rf = matrix(0, nrow(fraud.test), nrow(grid_rf))
+
+for(i in 1:nrow(grid_rf)){
+    rf_fit = ranger(
+      formula = fraud_bool~.,
+      data = fraud.train,
+      num.trees = grid_rf$num_tree[i],
+      mtry = 4, 
+      sample.fraction = grid_rf$sample_frac[i],
+      min.node.size = grid_rf$node_size[i], 
+      probability = TRUE,
+      seed = 1
+    )
+    
+  phat_list$rf[,i] = predict(rf_fit, data=fraud.test[,-31])$predictions[,1]
+}
+```
+
+random forests with best parameters:
+```{r}
+losses_rf = c()
+for (i in 1:nrow(grid_rf)){
+  losses_rf[i] = get_deviance(fraud.test$fraud_bool, phat_list$rf[,i])
+}
+
+best_param_rf = grid_rf[which.min(losses_rf),]
+
+best_rf_fit = ranger(
+    formula = fraud_bool~.,
+    data = fraud.train,
+    num.trees = best_param_rf$num_tree,
+    mtry = 4, 
+    sample.fraction = best_param_rf$sample_frac,
+    min.node.size = best_param_rf$node_size, 
+    probability = TRUE,
+    seed = 1
+)
+
+best_phat_rf = predict(best_rf_fit, data=fraud.test[,-31])$predictions[,1]
+```
+
+Confusion matrix and accuracy:
+```{r}
+rf_res = get_confusion_matrix(fraud.test$fraud_bool, best_phat_rf)
+rf_res$table
+
+paste('Accuracy:', round(rf_res$overall[1],3))
+
+```
+
+##SVM (support vector machine)
+```{r}
+set.seed(4776)
+svm <- caret::train(fraud_bool ~., 
+                    data = fraud.train, 
+                    method = "svmLinear3",
+                    preProcess = c("scale", "center"),
+                    trControl = trainControl(method = "repeatedcv",
+                                             number = 10,
+                                             repeats = 3,
+                                             savePredictions = TRUE,
+                                             verboseIter = FALSE))
+
+plot(svm)
+
+print(
+paste(
+"The final value used for the model was cost =",
+svm[["finalModel"]][["tuneValue"]][["cost"]],
+"and Loss =",
+svm[["finalModel"]][["tuneValue"]][["Loss"]]
+)
+)
+
+#predict
+svm_predict = predict(svm, fraud.test)
+#Confusion Matrix, o-o-s
+svm_cm=confusionMatrix(svm_predict, fraud.test$fraud_bool)
+svm_cm
+
+#accuracy
+accuracy_rate_svm =svm_cm$overall[["Accuracy"]]
+paste('accuracy_rate_svm',accuracy_rate_svm)
+
+#precision 
+precision <- svm_cm$byClass["Pos Pred Value"]
+paste('precision',precision)
+
+phat_list$svm <- matrix(svm_predict , ncol = 1)
+
+```
+During the training of the SVM model, the chosen parameter values were cost = 0.5 and Loss = L2.
+cost = 0.5: This is the cost parameter in SVM, which determines the penalty for misclassifications. A cost value of 0.5 indicates a moderate penalty for misclassifications.
+Loss = L2: This refers to the loss function used in the SVM model. L2 loss, also known as the squared error loss, measures the extent of misclassifications using the Euclidean distance (squared error). Choosing L2 loss means that the model aims to minimize the squared error distance to minimize misclassifications.
+
+```{r}
+set.seed(4776)
+# Load the randomForest library
+library(randomForest)
+
+# Set mtry = 10 for faster execution
+rf_model <- randomForest(fraud_bool ~ ., data = fraud.train, ntree = 100, mtry = 10)
+rf_predictions <- predict(rf_model, newdata = fraud.test)
+
+# Calculate accuracy
+accuracy <- sum(rf_predictions == fraud.test$fraud_bool) / nrow(fraud.test)
+paste('accuracy:', accuracy)
+
+# Calculate precision
+confusion_matrix <- table(rf_predictions, fraud.test$fraud_bool)
+precision <- confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+paste('precision:', precision)
+
+# Display confusion matrix
+print(confusion_matrix)
+
+# Initialize variables to track best parameters
+best_accuracy <- -1
+best_params <- NULL
+
+# Loop through different parameter combinations
+for (mtry in c(5, 10, 15)) {
+  for (ntree in c(50, 100, 150)) {
+    # Build random forest model with current parameter combination
+    rf_model <- randomForest(fraud_bool ~ ., data = fraud.train, ntree = ntree, mtry = mtry)
+    rf_predictions <- predict(rf_model, newdata = fraud.test)
+    
+    # Calculate accuracy
+    accuracy <- sum(rf_predictions == fraud.test$fraud_bool) / nrow(fraud.test)
+    
+    # Check if current accuracy is better than the best accuracy
+    if (accuracy > best_accuracy) {
+      best_accuracy <- accuracy
+      best_params <- c(ntree, mtry)
+    }
+  }
+}
+
+# Print the best parameters and accuracy
+paste('Best parameters:', best_params)
+paste('Best accuracy:', best_accuracy)
+
+```
