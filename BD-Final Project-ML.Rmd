@@ -21,7 +21,7 @@ library(caret)
 
 ```{r}
 rm(list=ls())
-setwd("/Users/lyidacao/Desktop/2022-2023 assignment/2022-2023 Term3/Big Data/final projet/archive")
+setwd("/Users/mikirin/Documents/GitHub/Bank-Fraud-Prediction")
 
 fraud_data <- read.csv('Base.csv')
 
@@ -86,11 +86,24 @@ fraud_data$cluster <- credit_clusters$cluster
 table(fraud_data$cluster)
 
 ```
-The clusters seem to differ in some variables more than others. For instance, the variable velocity_6h shows substantial differences between the clusters, suggesting that it's an important variable for distinguishing between different types of credit fraud.
+**Methodology**   
+We performed a cluster analysis on the bank fraud data using the k-prototypes method. The resulting clusters provide groupings of the data based on similarity across the variables included in the dataset.The k-prototypes algorithm, a combination of k-means and k-modes, works particularly well in the dataset as a mixture of categorical and numerical features.   
+**Observations**
+Cluster 1:   
+This cluster is characterized by a lower 'velocity_24h' and 'velocity_4w', suggesting a relatively lower transaction frequency within those periods. The higher credit risk score for this group compared to the other clusters indicates that these customers are generally considered less risky according to traditional credit scoring models. Predominantly, these customers use free email services, as indicated by the 'email_is_free' variable being 1. Furthermore, they tend not to possess other cards, as evidenced by 'has_other_cards' being 0, and they typically do not make foreign requests. Notably, customers in this group tend to have longer session lengths, suggesting they spend more time on the platform during a single session.
 
-Some variables don't show much difference across clusters (income, customer_age, credit_risk_score, etc.). This might suggest that these variables are not as useful for distinguishing between different types of credit fraud.
+Cluster 2:
+Customers in this cluster display moderate transaction activity, as evidenced by the second highest velocity variables ('velocity_24h' and 'velocity_4w'). Interestingly, this cluster also exhibits the highest credit risk score, suggesting these customers are perceived as the least risky group. Similar to Cluster 1, customers here also do not tend to have other cards or make foreign requests. However, their session lengths are the shortest among the clusters, indicating they spend less time on the platform per session.
 
-The categorical variables (email_is_free, phone_home_valid, etc.) show some differences between clusters. These could be important variables for distinguishing different types of credit fraud.
+Cluster 3:
+The third cluster comprises customers with the highest transaction frequency in the 'velocity_24h' and 'velocity_4w' periods. These customers have the lowest credit risk scores among the clusters, suggesting they are the riskiest group. Most customers in this cluster also use free email services. As with the other clusters, they typically do not possess other cards or make foreign requests. The session lengths for customers in this cluster fall in between those of Clusters 1 and 2.
+
+These insights indicate that transaction velocity measures ('velocity_24h', 'velocity_4w', 'velocity_6h') and 'credit_risk_score' are substantial differentiators between the clusters. It's also clear that certain categorical variables such as 'email_is_free', 'has_other_cards', and 'foreign_request' contribute to distinguishing these groups.
+
+However, certain variables, including 'income', 'customer_age', among others, show less variation across clusters. This could suggest their limited utility in differentiating types of credit fraud or imply a consistent influence across different fraud types.The categorical attributes including 'email_is_free', 'phone_home_valid', and others, showed some variation across the clusters, suggesting their potential role in distinguishing between different types of credit fraud. Thus, we would supplement these findings in clustering with additional analyses and predictive models for a comprehensive understanding of credit fraud patterns.
+
+
+
 
 #Machine Learning
 ```{r}
@@ -135,6 +148,8 @@ phat_list = list()
 #Logistic Regression:
 
 ```{r}
+set.seed(123)
+
 logistic <- glm(fraud_bool ~ ., family = binomial, data = fraud.train)
 
 summary(logistic)
@@ -147,16 +162,29 @@ phat_list$logit.phat = matrix(logit.phat,ncol=1)
 
 
 ```
+**Model Specification:** We applied a logistic regression model to predict the probability of fraudulent activities using the provided predictors in the dataset. The target variable was a boolean 'fraud_bool', denoting the occurrence of fraud. The regression results and key insights are detailed below.
+
+**Model Output:** Our logistic regression model (glm function with a binomial family) had a residual deviance of 11634 on 13175 degrees of freedom, suggesting a decent fit of the model to the data. This is an improvement over the null deviance, which stood at 18341 on 13229 degrees of freedom.   
+Several predictors turned out to be highly statistically significant, as suggested by their p-values (p < 0.05), including essential income indicators such as income and employment status ('income', 'employment_statusCB', 'employment_statusCD', 'employment_statusCE', 'employment_statusCF'), those indicating housing status, etc.. Meanwhile, there are a few variables less significant, such as payment type and 'velocity_6h', 'velocity_24h', 'velocity_4w'(p > 0.05).    
+
+An interesting observation in our regression analysis pertains to the variables 'velocity_6h', 'velocity_24h', and 'velocity_4w'. Despite their variance being pronounced in the clusters, they are not statistically significant in the logistic regression model. This suggests that while these variables might show significant differences across different clusters, they do not contribute meaningfully to the prediction of fraud in the model.
+
+This apparent contradiction may arise from various reasons. One explanation could be the presence of collinearity - these velocity variables might be highly correlated with other predictors in the model, leading to their significance being 'masked'. Alternatively, the clustering algorithm may be detecting patterns and structures in these variables that the logistic regression model isn't capturing due to its assumptions and design.
+
 
 Confusion matrix and accuracy:
 ```{r}
 #confusion matrix
 get_confusion_matrix(as.factor(fraud.test$fraud_bool), logit.phat)
 ```
+
 ```{r}
-3521/(3521+883)
+3500/(3500+904)
 ```
-#precision for identifying fraud case: 0.7995005
+#precision for identifying fraud case: 0.7947321
+
+**Model Performance:** The model achieved an overall accuracy of approximately 80%, as per the confusion matrix. The sensitivity and specificity were also in the same range. This result suggests that the model has a good balance between correctly identifying positive instances (fraud) and negative instances (non-fraud).
+
 
 #Knn: 
 ```{r}
@@ -178,6 +206,9 @@ table(fraud.train$payment_type)
 ```
 
 ```{r}
+
+set.seed(123)
+
 # Define the grid for k and distance parameters
 grid_knn = expand.grid(
   k = c(5, 10),  # Number of neighbors
@@ -204,6 +235,7 @@ for (i in 1:nrow(grid_knn)){
 }
 
 ```
+
 Grid Search for Knn
 ```{r}
 # Calculate losses for each parameter combination
@@ -229,6 +261,12 @@ best_knn_fit = train.kknn(
 best_phat_knn = predict(best_knn_fit, newdata = fraud.test.scaled, type = "prob")[,2]
 
 ```
+**Model Specification:**    
+We applied k-NN model which assumes that data points closer in proximity are more similar and thus share the same class.   
+We first scaled the training and testing data as a preprocessing step for the k-NN algorithm, as it operates based on the distances between data points. By doing so, we prevented the algorithm from being unduly influenced by features with larger scales. We then conducted a grid search over two key hyperparameters of the k-NN model: 'k' (the number of nearest neighbors considered) and 'distance' (which dictates the type of distance metric used). This process involved training the k-NN model on combinations of 'k' values of 5 and 10, and 'distance' values of 1 and 2. The optimal combination of these hyperparameters was determined by identifying the set of parameters that minimized the deviance.   
+
+**Model Output:**    
+According to the results, the best hyperparameters for this model were found to be 'k' equals to 10 and 'distance' equals to 1. The final k-NN model was therefore trained using these optimal parameters.
 
 Confusion matrix by KNN
 ```{r}
@@ -238,8 +276,12 @@ knn_res$table
 # Print the accuracy 
 paste('Accuracy:', round(knn_res$overall[1],3))
 
-4183/(4183+221)
 ```
+
+**Model Performance:*   
+The confusion matrix showed that our model achieved an overall accuracy of approximately 93.6%, highlighting its proficiency at correctly identifying both fraudulent and non-fraudulent transactions. Precision, the proportion of positive identifications that were indeed correct, was calculated to be approximately 0.933, indicating a relatively low false positive rate of our model. On the other hand, recall, the proportion of actual positives that were identified correctly, came out to be about 0.938. This metric is particularly significant in our fraud detection scenarios as it represents the model's capability to correctly identify fraudulent transactions out of all actual fraudulent cases. A higher Recall means that the model misses fewer fraudulent transactions. The above statistical features suggest encouraging results that our k-NN model with k=10 and distance=1 has demonstrated a strong performance in the test data.
+
+
 
 
 #Decision Tree
@@ -291,6 +333,17 @@ best_tree_fit = rpart(
 
 best_phat_tree = predict(best_tree_fit, newdata=fraud.test[,-31], type='prob')[,2]
 ```
+**Model Specification:**   
+In this analysis, we explored a Decision Tree model to classify fraudulent transactions.
+The model was trained using a range of hyperparameters which were defined in the grid search:   
+
+Maximum depth: 5, 10, 20   
+Complexity parameter (cp): 0.1, 0.01, 0.001   
+Minimum split: 1, 5, 10, 20   
+Minimum bucket: 5, 10, 15   
+Each parameter combination was run through the model, with the resulting probabilities stored. Following this, the model's performance was evaluated using the deviance between the test data and the predicted probabilities. The best parameter combination was identified as having the smallest deviance, and the model was then retrained using these optimal parameters.
+
+
 
 
 Confusion Matrix & Accuracy:
@@ -313,6 +366,11 @@ paste('Accuracy:', round(tree_res$overall[1],3))
 #Precision (No Fraud) = TN / (TN + FN) = 0.7772458
 
 ```
+**Model Performance:*   
+The model achieved an accuracy of approximately 76.7%. This value is lower than what was observed in the k-NN model, suggesting that it might not be as proficient at correctly identifying fraudulent and non-fraudulent transactions. Since the model is used for bank fraud prediction, reducing false negatives - cases where a fraudulent transaction is missed, is crucial. The decision tree model appears to have a higher rate of false negatives, which could be a drawback in real-world scenarios.Thus, while decision tree models are interpretable and easy to visualize, the performance of this particular model suggests that more work may be needed to refine and improve it. We will proceed to explore more advanced tree-based models like Gradient Boosted Machines and Random Forests.
+
+
+
 
 #Boosting - XGBoost Model
 
@@ -391,6 +449,12 @@ boost_fit_best = xgboost(
 best_phat_boost = predict(boost_fit_best, newdata=X_val)
 ```
 
+**Model Specification:**
+Rather than just constructing a single decision tree, we use XGBoost to create a series of trees that successively learn from the errors of their predecessors.
+We established a grid of hyperparameters, including the shrinkage parameter (eta), the interaction depth (max_depth), and the number of rounds (nrounds), which serves as a guide to explore different combinations of parameters, refining our model in the process. For each combination of hyperparameters, we trained an XGBoost model and made predictions on the test data. We then selected the model with the lowest deviance (i.e., the best fit) as our final model.
+
+
+
 Confusion matrix & accuracy:
 ```{r}
 boost_res = get_confusion_matrix(y_val, best_phat_boost)
@@ -401,6 +465,10 @@ boost_res$table
 paste('Accuracy:', round(boost_res$overall[1],3))
 
 ```
+
+**Model Performance:**
+
+The XGBoost model, in this scenario, performed considerably better than the individual decision tree model. The overall accuracy of the XGBoost model was approximately 0.818, compared to 0.767 for the decision tree model. Furthermore, the model achieved a recall of approximately 81.9%, meaning that it was able to detect about 81.9% of all actual fraudulent transactions. The improvement is likely due to the ability of the XGBoost model to sequentially correct the mistakes of previous trees, handle various types of predictor variables, manage missing values, and control overfitting.
 
 precision: 3587/(3587+817) = 0.8144868
 
@@ -504,9 +572,13 @@ paste('precision',precision)
 phat_list$svm <- matrix(svm_predict , ncol = 1)
 
 ```
-During the training of the SVM model, the chosen parameter values were cost = 0.5 and Loss = L2.
+**Model Output:**
+We use a linear SVM for a binary classification / prediction of bank fraud incidents. During the training of the SVM model, the chosen parameter values were cost = 0.5 and Loss = L2.
 cost = 0.5: This is the cost parameter in SVM, which determines the penalty for misclassifications. A cost value of 0.5 indicates a moderate penalty for misclassifications.
 Loss = L2: This refers to the loss function used in the SVM model. L2 loss, also known as the squared error loss, measures the extent of misclassifications using the Euclidean distance (squared error). Choosing L2 loss means that the model aims to minimize the squared error distance to minimize misclassifications.
+
+**Model Performance:**
+Our SVM model was feature by 0.7978 overall accuracy, 0.7954 precision (actual fraud cases that were correctly identified as fraud), and 0.8026 recall (proportion of actual fraud cases that were correctly identified). It performed slightly better than the Decision Tree and XGBoost models, but not as well as the KNN model. SVMs are effective in high-dimensional spaces and best suited for binary classification problems, but they can be sensitive to the choice of the kernel and the regularization parameter.
 
 ```{r}
 set.seed(4776)
@@ -556,3 +628,12 @@ paste('Best parameters:', best_params)
 paste('Best accuracy:', best_accuracy)
 
 ```
+
+**Model Output:**
+The best parameters found for this model are:
+
+The number of trees (ntree) is 150.
+The number of variables randomly sampled at each split (mtry) is 5.
+
+**Model Performance:**
+The highest accuracy achieved with these parameters is approximately 0.8. The Random Forest model was also featured by a precision of 80.36%, and recall of 80.35%. We see that the Boosted model outperforms all others in accuracy, precision, and recall. But a Random Forest model can be more efficient in terms of the computational cost.
